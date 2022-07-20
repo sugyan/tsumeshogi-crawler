@@ -1,10 +1,10 @@
 import os
 import re
-from argparse import Namespace
 from datetime import date
 from logging import DEBUG, INFO, Formatter, StreamHandler, getLogger
 from pathlib import Path
 from time import sleep
+from typing import Optional
 from urllib.parse import urlparse
 
 import requests
@@ -13,14 +13,15 @@ from urllib3.util.retry import Retry
 
 
 class Crawler:
-    def __init__(self, outdir: Path, args: Namespace) -> None:
+    def __init__(self, outdir: Path, target_year: Optional[int], verbose: bool) -> None:
         self.outdir = outdir.resolve(strict=True)
         if not self.outdir.is_dir():
             raise FileNotFoundError(f"{self.outdir} is not a directory")
+        self.target_year = target_year if target_year is not None else date.today().year
 
         # logger
         self.logger = getLogger(__name__)
-        if args.verbose:
+        if verbose:
             self.logger.setLevel(DEBUG)
         else:
             self.logger.setLevel(INFO)
@@ -37,7 +38,7 @@ class Crawler:
         )
         # regexp
         self.re_title = re.compile(
-            r"^(?P<date_y>\d+)年(?P<date_m>\d+)月(?P<date_d>\d+)日"
+            r"^(?P<date_y>\d+)年(?P<date_m>\d+)\s*月(?P<date_d>\d+)\s*日"
             r"の詰将棋（.*?(?P<number>\d+)手詰）"
         )
         self.re_kif_url = re.compile(r"'(.+\.kif)'")
@@ -52,14 +53,15 @@ class Crawler:
         for item in soup.select("#contents > ul li a"):
             assert type(item["href"]) == str
             sleep(0.5)
-            self.get(item["href"])
+            if self.get(item["href"]):
+                return
 
         if next := soup.select_one("li.next a"):
             assert type(next["href"]) == str
             sleep(1.0)
             self.get_index(next["href"])
 
-    def get(self, url: str) -> None:
+    def get(self, url: str) -> bool:
         self.logger.info(f"get: {url}")
         try:
             soup = self.get_soup(url)
@@ -68,6 +70,13 @@ class Crawler:
             match = self.re_title.match(soup.title.text)
             assert match
             d = date(*[int(match.group(g)) for g in ["date_y", "date_m", "date_d"]])
+            if d.year < 2000:
+                # https://www.shogi.or.jp/tsume_shogi/everyday/02251011.html
+                d = d.replace(year=d.year + 2000)
+            # Skip or Finish
+            if d.year != self.target_year:
+                return d.year < self.target_year
+
             dir = self.outdir / f"{d.year:04d}"
             dir.mkdir(exist_ok=True)
             prefix = "{}_{:03d}_".format(
@@ -81,6 +90,8 @@ class Crawler:
             self.download_kif(m.group(1), dir, prefix)
         except Exception as e:
             self.logger.error(e)
+
+        return False
 
     def get_soup(self, url: str) -> BeautifulSoup:
         res = self.client.get(url)
